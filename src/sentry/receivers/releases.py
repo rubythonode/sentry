@@ -1,9 +1,14 @@
 from __future__ import absolute_import, print_function
 
+import re
+
+from django.db import IntegrityError, transaction
 from django.db.models.signals import post_save
 
 from sentry.app import locks
-from sentry.models import Release, TagValue
+from sentry.models import (
+    Commit, Group, GroupCommitResolution, Release, TagValue
+)
 from sentry.tasks.clear_expired_resolutions import clear_expired_resolutions
 from sentry.utils.retries import TimedRetryPolicy
 
@@ -53,6 +58,34 @@ def resolve_group_resolutions(instance, created, **kwargs):
     clear_expired_resolutions.delay(release_id=instance.id)
 
 
+def resolved_in_commit(instance, created, **kwargs):
+    # TODO(dcramer): we probably should support an updated message
+    if not created:
+        return
+
+    match = re.search(r'\bFixes ([A-Za-z0-9_-]+-[A-Z0-9]+)\b')
+    if not match:
+        return
+
+    short_id = match.group(1)
+    try:
+        group = Group.objects.get(
+            project__organization=instance.organization_id,
+            short_id=short_id,
+        )
+    except Group.DoesNotExist:
+        return
+
+    try:
+        with transaction.atomic():
+            GroupCommitResolution.objects.create(
+                group_id=group.id,
+                commit_id=instance.id,
+            )
+    except IntegrityError:
+        pass
+
+
 post_save.connect(
     resolve_group_resolutions,
     sender=Release,
@@ -66,4 +99,12 @@ post_save.connect(
     sender=TagValue,
     dispatch_uid="ensure_release_exists",
     weak=False
+)
+
+
+post_save.connect(
+    resolved_in_commit,
+    sender=Commit,
+    dispatch_uid="resolved_in_commit",
+    weak=False,
 )

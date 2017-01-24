@@ -869,7 +869,7 @@ class EventManager(object):
             # we only mark it as a regression if the event's release is newer than
             # the release which we originally marked this as resolved
             has_resolution = GroupResolution.objects.filter(
-                Q(release__date_added__gt=release.date_added) | Q(release=release),
+                Q(release__date_added__gt=release.date_added) | Q(release=release) | Q(release__isnull=True),
                 group=group,
             ).exists()
             if has_resolution:
