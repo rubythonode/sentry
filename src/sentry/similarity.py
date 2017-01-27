@@ -247,6 +247,8 @@ class MinHashIndex(object):
                 )
 
 
+import itertools
+
 from sentry.models import Event
 from sentry.utils import redis
 from sentry.utils.iterators import shingle
@@ -280,6 +282,9 @@ class GroupFeatureManager(object):
     def __init__(self, features):
         self.features = features
 
+    def get(self, label):
+        return self.features[label]
+
     def query(self, group):
         results = {}
         for label, feature in self.features.items():
@@ -305,18 +310,45 @@ class GroupFeatureManager(object):
         return results
 
 
+def tokenize_frame(frame):
+    return '{module}.{function}'.format(
+        module=frame.get('module', '?'),
+        function=frame.get('function', '?'),
+    )
+
+
 features = GroupFeatureManager({
+    'application-frames': GroupFeature(
+        MinHashIndex(redis.clusters.get('default'), 0xFFFF, 8, 2),
+        scope=lambda group: ['af', six.text_type(group.project_id)],
+        key=lambda group: [six.text_type(group.id)],
+        characteristics=lambda event: itertools.imap(
+            lambda (in_app, frames): tuple(
+                map(
+                    tokenize_frame,
+                    frames,
+                )
+            ),
+            itertools.ifilter(
+                lambda (in_app, frames): in_app,
+                itertools.groupby(
+                    event.data['sentry.interfaces.Exception']['values'][0]['stacktrace']['frames'],
+                    key=lambda frame: frame.get('in_app', False),
+                )
+            ),
+        ),
+    ),
     'frames': GroupFeature(
         MinHashIndex(redis.clusters.get('default'), 0xFFFF, 8, 2),
         scope=lambda group: ['f', six.text_type(group.project_id)],
         key=lambda group: [six.text_type(group.id)],
-        characteristics=lambda event: shingle(3, [
-            '{module}.{function}'.format(
-                module=frame.get('module', '?'),
-                function=frame.get('function', '?'),
-            ) for frame in
-            event.data['sentry.interfaces.Exception']['values'][0]['stacktrace']['frames']
-        ])
+        characteristics=lambda event: shingle(
+            3,
+            map(
+                tokenize_frame,
+                event.data['sentry.interfaces.Exception']['values'][0]['stacktrace']['frames'],
+            ),
+        )
     ),
     'message': GroupFeature(
         MinHashIndex(redis.clusters.get('default'), 0xFFFF, 8, 2),
