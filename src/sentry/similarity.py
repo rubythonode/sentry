@@ -4,6 +4,8 @@ import math
 import random
 import struct
 
+import six
+
 
 def scale_to_total(value):
     """\
@@ -243,3 +245,86 @@ class MinHashIndex(object):
                     buckets,
                     1,
                 )
+
+
+from sentry.models import Event
+from sentry.utils import redis
+from sentry.utils.iterators import shingle
+
+
+class GroupFeature(object):
+    def __init__(self, index, scope, key, characteristics):
+        self.index = index
+        self.scope = scope
+        self.key = key
+        self.characteristics = characteristics
+
+    def __flatten_sequence(self, sequence):
+        return ':'.join(sequence)
+
+    def query(self, group):
+        return self.index.query(
+            self.__flatten_sequence(self.scope(group)),
+            self.__flatten_sequence(self.key(group)),
+        )
+
+    def record(self, event):
+        return self.index.record(
+            self.__flatten_sequence(self.scope(event.group)),
+            self.__flatten_sequence(self.key(event.group)),
+            self.characteristics(event),
+        )
+
+
+class GroupFeatureManager(object):
+    def __init__(self, features):
+        self.features = features
+
+    def query(self, group):
+        results = {}
+        for label, feature in self.features.items():
+            for key, similarity in feature.query(group):
+                results.setdefault(key, {})[label] = similarity
+        return sorted(
+            results.items(),
+            key=lambda (key, similarities): sum(similarities.values()),
+            reverse=True,
+        )
+
+    def record(self, event):
+        Event.objects.bind_nodes([event], 'data')
+
+        results = []
+        for label, feature in self.features.items():
+            # XXX: This is really bad and should use futures instead.
+            try:
+                results.append((True, feature.record(event)))
+            except Exception as error:
+                results.append((False, error))
+
+        return results
+
+
+features = GroupFeatureManager({
+    'frames': GroupFeature(
+        MinHashIndex(redis.clusters.get('default'), 0xFFFF, 8, 2),
+        scope=lambda group: ['f', six.text_type(group.project_id)],
+        key=lambda group: [six.text_type(group.id)],
+        characteristics=lambda event: shingle(3, [
+            '{module}.{function}'.format(
+                module=frame.get('module', '?'),
+                function=frame.get('function', '?'),
+            ) for frame in
+            event.data['sentry.interfaces.Exception']['values'][0]['stacktrace']['frames']
+        ])
+    ),
+    'message': GroupFeature(
+        MinHashIndex(redis.clusters.get('default'), 0xFFFF, 8, 2),
+        scope=lambda group: ['m', six.text_type(group.project_id)],
+        key=lambda group: [six.text_type(group.id)],
+        characteristics=lambda event: shingle(
+            3,
+            event.data['sentry.interfaces.Exception']['values'][0]['value'].split(),
+        )
+    ),
+})
