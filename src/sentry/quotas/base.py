@@ -9,15 +9,38 @@ from __future__ import absolute_import
 
 import six
 
-from collections import namedtuple
-from functools import partial
 from django.conf import settings
 
 from sentry import options
 
-RateLimit = namedtuple('RateLimit', ('is_limited', 'retry_after'))
-NotRateLimited = RateLimit(False, None)
-RateLimited = partial(RateLimit, is_limited=True)
+
+class RateLimit(object):
+    __slots__ = ['is_limited', 'retry_after', 'reason', 'reason_code']
+
+    is_limited = None
+    # delta of seconds in the future to retry
+    retry_after = None
+    # human readable description
+    reason = None
+    # robot readable description
+    reason_code = None
+
+    def __init__(self, is_limited=None, retry_after=None, reason=None,
+                 reason_code=None):
+        self.is_limited = is_limited
+        self.retry_after = retry_after
+        self.reason = reason
+        self.reason_code = reason_code
+
+
+class NotRateLimited(RateLimit):
+    def __init__(self, **kwargs):
+        super(NotRateLimited, self).__init__(False, **kwargs)
+
+
+class RateLimited(RateLimit):
+    def __init__(self, **kwargs):
+        super(RateLimited, self).__init__(True, **kwargs)
 
 
 class Quota(object):
@@ -38,7 +61,7 @@ class Quota(object):
         """
 
     def is_rate_limited(self, project):
-        return NotRateLimited
+        return NotRateLimited()
 
     def get_time_remaining(self):
         return 0
