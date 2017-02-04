@@ -134,8 +134,6 @@ class BaseManager(Manager):
                 f: self.__value_for_field(instance, f)
                 for f in self.cache_fields
             }
-        else:
-            self.__cache[instance] = UNSAVED
 
     def __post_init(self, instance, **kwargs):
         """
